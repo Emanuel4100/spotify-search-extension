@@ -7,8 +7,8 @@ export default class SpotifyPrefs extends ExtensionPreferences {
     fillPreferencesWindow(window: Adw.PreferencesWindow) {
         const page = new Adw.PreferencesPage();
         const group = new Adw.PreferencesGroup({ 
-            title: 'Spotify API Credentials',
-            description: 'Get these from the Spotify Developer Dashboard' 
+            title: 'Spotify Credentials',
+            description: 'Enter your Client ID and Secret. The Queue ($q) is handled locally by GNOME, so no browser login is required!'
         });
         page.add(group);
         window.add(page);
