@@ -1,0 +1,8 @@
+{
+  "uuid": "spotify-search@yourname.example.com",
+  "name": "Spotify Search Provider",
+  "description": "Search Spotify directly from the activities overview. Set keys in settings.",
+  "shell-version": [ "49" ],
+  "settings-schema": "org.gnome.shell.extensions.spotify-search",
+  "url": ""
+}

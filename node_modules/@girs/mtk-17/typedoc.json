@@ -1,0 +1,7 @@
+{
+    "entryPoints": ["./mtk-17.d.ts"],
+    "readme": "./README.md",
+    "name": "Mtk-17",
+    "tsconfig": "./tsconfig.json"
+}
+
