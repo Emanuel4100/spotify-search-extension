@@ -7,9 +7,10 @@
   "scripts": {
     "build": "esbuild src/extension.ts --bundle --external:gi://* --external:resource://* --format=esm --outfile=extension.js && esbuild src/prefs.ts --bundle --external:gi://* --external:resource://* --format=esm --outfile=prefs.js",
     "compile-schemas": "glib-compile-schemas schemas/",
-    "install-ext": "npm run build && npm run compile-schemas && mkdir -p ~/.local/share/gnome-shell/extensions/spotify-search@yourname.example.com/schemas && cp extension.js prefs.js metadata.json schemas/gschemas.compiled ~/.local/share/gnome-shell/extensions/spotify-search@yourname.example.com/ && cp schemas/*.xml ~/.local/share/gnome-shell/extensions/spotify-search@yourname.example.com/schemas/",
-    "enable": "gnome-extensions enable spotify-search@yourname.example.com",
-    "disable": "gnome-extensions disable spotify-search@yourname.example.com"
+    "pack": "npm run build && npm run compile-schemas && node scripts/pack.mjs",
+    "install-ext": "npm run build && npm run compile-schemas && node scripts/install-local.mjs",
+    "enable": "gnome-extensions enable spotify-search@emanuel.github.io",
+    "disable": "gnome-extensions disable spotify-search@emanuel.github.io"
   },
   "devDependencies": {
     "@girs/adw-1": "^1.0.0",

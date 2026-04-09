@@ -5,64 +5,54 @@ import St from "gi://St";
 import Soup from "gi://Soup?version=3.0";
 import { Extension } from "resource:///org/gnome/shell/extensions/extension.js";
 import * as Main from "resource:///org/gnome/shell/ui/main.js";
+import { logError } from "resource:///org/gnome/shell/misc/util.js";
+function parseSpotifyCommand(query) {
+  const q = query.trim().toLowerCase();
+  if (!q.startsWith("$")) return null;
+  const parts = q.substring(1).trim().split(/\s+/);
+  const cmd = parts[0] ?? "";
+  const arg = parts.slice(1).join(" ").trim();
+  if (!arg) return null;
+  if (cmd === "p" || cmd === "play" || cmd === "t" || cmd === "track")
+    return { searchQuery: arg, searchType: "track" };
+  if (cmd === "q" || cmd === "queue")
+    return { searchQuery: arg, searchType: "track" };
+  if (cmd === "a" || cmd === "artist")
+    return { searchQuery: arg, searchType: "artist" };
+  if (cmd === "al" || cmd === "album")
+    return { searchQuery: arg, searchType: "album" };
+  if (cmd === "pl" || cmd === "playlist")
+    return { searchQuery: arg, searchType: "playlist" };
+  return null;
+}
 var SpotifySearchProvider = class {
-  id = "spotify-search-provider";
-  appInfo = null;
-  canModifyContentList = false;
+  _extension;
+  get id() {
+    return this._extension.uuid;
+  }
+  get appInfo() {
+    return this._spotifyAppInfo;
+  }
+  get canLaunchSearch() {
+    return false;
+  }
+  _spotifyAppInfo = null;
   soupSession = null;
-  accessToken = null;
+  /** User OAuth access token (queue API only). */
+  userAccessToken = null;
+  /** Client-credentials access token (search API). */
+  ccAccessToken = null;
+  ccExpiresAt = 0;
   trackCache = /* @__PURE__ */ new Map();
   _settings;
-  // GNOME SHADOW QUEUE ENGINE
-  myQueue = [];
-  isHijacking = false;
-  dbusListenerId = null;
-  constructor(settings) {
+  constructor(extension, settings) {
+    this._extension = extension;
     this._settings = settings;
     try {
-      this.appInfo = Gio.DesktopAppInfo.new("com.spotify.Client.desktop") || Gio.DesktopAppInfo.new("spotify.desktop") || Gio.DesktopAppInfo.new("spotify-client.desktop");
+      this._spotifyAppInfo = Gio.DesktopAppInfo.new("com.spotify.Client.desktop") || Gio.DesktopAppInfo.new("spotify.desktop") || Gio.DesktopAppInfo.new("spotify-client.desktop");
       this.soupSession = new Soup.Session();
-      this.dbusListenerId = Gio.DBus.session.signal_subscribe(
-        "org.mpris.MediaPlayer2.spotify",
-        "org.freedesktop.DBus.Properties",
-        "PropertiesChanged",
-        "/org/mpris/MediaPlayer2",
-        null,
-        Gio.DBusSignalFlags.NONE,
-        (conn, sender, path, iface, signal, parameters) => {
-          const unpacked = parameters.deep_unpack();
-          const changedProps = unpacked[1];
-          if (changedProps && changedProps["Metadata"]) {
-            if (this.myQueue.length > 0 && !this.isHijacking) {
-              this.isHijacking = true;
-              const nextUri = this.myQueue.shift();
-              Gio.DBus.session.call(
-                "org.mpris.MediaPlayer2.spotify",
-                "/org/mpris/MediaPlayer2",
-                "org.mpris.MediaPlayer2.Player",
-                "OpenUri",
-                new GLib.Variant("(s)", [nextUri]),
-                null,
-                Gio.DBusCallFlags.NONE,
-                -1,
-                null,
-                null
-              );
-              Main.notify("\u{1F3B5} Spotify Queue", "Playing next shadow track");
-              GLib.timeout_add(GLib.PRIORITY_DEFAULT, 2e3, () => {
-                this.isHijacking = false;
-                return GLib.SOURCE_REMOVE;
-              });
-            }
-          }
-        }
-      );
     } catch (e) {
-    }
-  }
-  destroy() {
-    if (this.dbusListenerId) {
-      Gio.DBus.session.signal_unsubscribe(this.dbusListenerId);
+      logError(e, "SpotifySearchProvider constructor");
     }
   }
   get clientId() {
@@ -71,21 +61,42 @@ var SpotifySearchProvider = class {
   get clientSecret() {
     return this._settings.get_string("client-secret");
   }
-  async getAccessToken() {
-    if (!this.clientId || !this.clientSecret || !this.soupSession) return false;
-    return new Promise((resolve) => {
-      const authStr = `${this.clientId}:${this.clientSecret}`;
-      const authBytes = new TextEncoder().encode(authStr);
-      const auth = GLib.base64_encode(authBytes);
-      const bodyStr = "grant_type=client_credentials";
+  get refreshToken() {
+    return this._settings.get_string("refresh-token");
+  }
+  launchSearch(_terms) {
+  }
+  createResultObject(_meta) {
+    return null;
+  }
+  _basicAuthHeader() {
+    if (!this.clientId || !this.clientSecret) return null;
+    const authBytes = new TextEncoder().encode(`${this.clientId}:${this.clientSecret}`);
+    return GLib.base64_encode(authBytes);
+  }
+  /** Refresh user access token (for queue). */
+  getUserAccessToken(cancellable) {
+    if (!this.soupSession) return Promise.resolve(false);
+    const auth = this._basicAuthHeader();
+    if (!auth) return Promise.resolve(false);
+    if (!this.refreshToken) return Promise.resolve(false);
+    return new Promise((resolve, reject) => {
+      if (cancellable?.is_cancelled()) {
+        reject(new Error("Search Cancelled"));
+        return;
+      }
+      const bodyStr = `grant_type=refresh_token&refresh_token=${encodeURIComponent(this.refreshToken)}`;
       const bodyBytes = new TextEncoder().encode(bodyStr);
-      const tokenUrl = "https://accounts.spotify.com/api/token";
-      const msg = Soup.Message.new("POST", tokenUrl);
+      const msg = Soup.Message.new("POST", "https://accounts.spotify.com/api/token");
       msg.request_headers.append("Authorization", `Basic ${auth}`);
       msg.request_headers.append("Content-Type", "application/x-www-form-urlencoded");
       msg.set_request_body_from_bytes("application/x-www-form-urlencoded", GLib.Bytes.new(bodyBytes));
-      this.soupSession.send_and_read_async(msg, GLib.PRIORITY_DEFAULT, null, (session, res) => {
+      this.soupSession.send_and_read_async(msg, GLib.PRIORITY_DEFAULT, cancellable, (session, res) => {
         try {
+          if (cancellable?.is_cancelled()) {
+            reject(new Error("Search Cancelled"));
+            return;
+          }
           const bytes = session.send_and_read_finish(res);
           const dataArray = bytes.get_data();
           if (!dataArray) {
@@ -95,164 +106,205 @@ var SpotifySearchProvider = class {
           const text = new TextDecoder("utf-8").decode(dataArray);
           const data = JSON.parse(text);
           if (data.access_token) {
-            this.accessToken = data.access_token;
+            this.userAccessToken = data.access_token;
             resolve(true);
             return;
           }
         } catch (e) {
+          logError(e, "Spotify getUserAccessToken");
         }
         resolve(false);
       });
     });
   }
-  async searchSpotify(query, type = "track") {
-    if (!this.soupSession) return null;
-    if (!this.accessToken) {
-      const success = await this.getAccessToken();
-      if (!success) return null;
-    }
-    return new Promise((resolve) => {
-      const baseUrl = "https://api.spotify.com/v1/search?q=";
-      const url = `${baseUrl}${encodeURIComponent(query)}&type=${type}&limit=5`;
-      const msg = Soup.Message.new("GET", url);
-      msg.request_headers.append("Authorization", `Bearer ${this.accessToken}`);
-      this.soupSession.send_and_read_async(msg, GLib.PRIORITY_DEFAULT, null, (session, res) => {
+  /** Client-credentials token for catalog search (no user login). */
+  getClientCredentialsToken(cancellable) {
+    if (!this.soupSession) return Promise.resolve(false);
+    const auth = this._basicAuthHeader();
+    if (!auth) return Promise.resolve(false);
+    const now = Date.now();
+    if (this.ccAccessToken && now < this.ccExpiresAt - 6e4) return Promise.resolve(true);
+    return new Promise((resolve, reject) => {
+      if (cancellable?.is_cancelled()) {
+        reject(new Error("Search Cancelled"));
+        return;
+      }
+      const bodyStr = "grant_type=client_credentials";
+      const bodyBytes = new TextEncoder().encode(bodyStr);
+      const msg = Soup.Message.new("POST", "https://accounts.spotify.com/api/token");
+      msg.request_headers.append("Authorization", `Basic ${auth}`);
+      msg.request_headers.append("Content-Type", "application/x-www-form-urlencoded");
+      msg.set_request_body_from_bytes("application/x-www-form-urlencoded", GLib.Bytes.new(bodyBytes));
+      this.soupSession.send_and_read_async(msg, GLib.PRIORITY_DEFAULT, cancellable, (session, res) => {
         try {
+          if (cancellable?.is_cancelled()) {
+            reject(new Error("Search Cancelled"));
+            return;
+          }
           const bytes = session.send_and_read_finish(res);
           const dataArray = bytes.get_data();
           if (!dataArray) {
-            resolve(null);
+            resolve(false);
             return;
           }
           const text = new TextDecoder("utf-8").decode(dataArray);
-          const json = JSON.parse(text);
-          if (json.error && json.error.status === 401) {
-            this.accessToken = null;
-            resolve(null);
+          const data = JSON.parse(text);
+          if (data.access_token) {
+            this.ccAccessToken = data.access_token;
+            const sec = Number(data.expires_in) || 3600;
+            this.ccExpiresAt = Date.now() + sec * 1e3;
+            resolve(true);
             return;
           }
-          resolve(json);
         } catch (e) {
-          resolve(null);
+          logError(e, "Spotify getClientCredentialsToken");
         }
+        resolve(false);
+      });
+    });
+  }
+  searchSpotify(query, type, cancellable) {
+    if (!this.soupSession) return Promise.resolve(null);
+    return new Promise((resolve, reject) => {
+      if (cancellable.is_cancelled()) {
+        reject(new Error("Search Cancelled"));
+        return;
+      }
+      const finish = (fn) => {
+        fn();
+      };
+      this.getClientCredentialsToken(cancellable).then((ok) => {
+        if (cancellable.is_cancelled()) {
+          finish(() => reject(new Error("Search Cancelled")));
+          return;
+        }
+        if (!ok || !this.ccAccessToken) {
+          finish(() => resolve(null));
+          return;
+        }
+        const url = `https://api.spotify.com/v1/search?q=${encodeURIComponent(query)}&type=${encodeURIComponent(type)}&limit=5`;
+        const msg = Soup.Message.new("GET", url);
+        msg.request_headers.append("Authorization", `Bearer ${this.ccAccessToken}`);
+        this.soupSession.send_and_read_async(msg, GLib.PRIORITY_DEFAULT, cancellable, (session, res) => {
+          try {
+            if (cancellable.is_cancelled()) {
+              finish(() => reject(new Error("Search Cancelled")));
+              return;
+            }
+            const bytes = session.send_and_read_finish(res);
+            const dataArray = bytes.get_data();
+            if (!dataArray) {
+              finish(() => resolve(null));
+              return;
+            }
+            const text = new TextDecoder("utf-8").decode(dataArray);
+            const json = JSON.parse(text);
+            if (json.error && json.error.status === 401) {
+              this.ccAccessToken = null;
+              this.ccExpiresAt = 0;
+              finish(() => resolve(null));
+              return;
+            }
+            finish(() => resolve(json));
+          } catch (e) {
+            if (cancellable.is_cancelled()) {
+              finish(() => reject(new Error("Search Cancelled")));
+              return;
+            }
+            finish(() => resolve(null));
+          }
+        });
+      }).catch((e) => {
+        finish(() => reject(e));
       });
     });
   }
   getInitialResultSet(terms, cancellable) {
-    return new Promise(async (resolve) => {
-      const query = terms.join(" ").trim().toLowerCase();
+    return new Promise((resolve, reject) => {
+      if (cancellable.is_cancelled()) {
+        reject(new Error("Search Cancelled"));
+        return;
+      }
+      const query = terms.join(" ").trim();
       if (!query) {
         resolve([]);
         return;
       }
-      let searchQuery = query;
-      let searchType = "track";
-      let isQueueCommand = false;
-      if (query.startsWith("$")) {
-        const parts = query.substring(1).trim().split(" ");
-        const cmd = parts[0];
-        const arg = parts.slice(1).join(" ").trim();
-        if (!arg) {
-          if (cmd === "p" || cmd === "play") {
-            resolve(["spotify:command:play"]);
-            return;
-          }
-          if (cmd === "pause") {
-            resolve(["spotify:command:pause"]);
-            return;
-          }
-          if (cmd === "n" || cmd === "next") {
-            resolve(["spotify:command:next"]);
-            return;
-          }
-          if (cmd === "prev" || cmd === "previous") {
-            resolve(["spotify:command:previous"]);
-            return;
-          }
-          if (cmd === "q" || cmd === "queue") {
-            resolve([]);
-            return;
-          }
-        }
-        if (cmd === "p" || cmd === "play" || cmd === "t" || cmd === "track") {
-          searchQuery = arg;
-          searchType = "track";
-        } else if (cmd === "q" || cmd === "queue") {
-          searchQuery = arg;
-          searchType = "track";
-          isQueueCommand = true;
-        } else if (cmd === "a" || cmd === "artist") {
-          searchQuery = arg;
-          searchType = "artist";
-        } else if (cmd === "al" || cmd === "album") {
-          searchQuery = arg;
-          searchType = "album";
-        } else if (cmd === "pl" || cmd === "playlist") {
-          searchQuery = arg;
-          searchType = "playlist";
-        } else {
-          resolve([]);
-          return;
-        }
-      }
-      const json = await this.searchSpotify(searchQuery, searchType);
-      if (!json) {
+      const parsed = parseSpotifyCommand(query);
+      if (!parsed) {
         resolve([]);
         return;
       }
-      const ids = [];
-      const items = json[`${searchType}s`]?.items || [];
-      for (const item of items) {
-        if (!item) continue;
-        item._searchType = searchType;
-        this.trackCache.set(item.uri, item);
-        ids.push(isQueueCommand ? `spotify:queue:${item.uri}` : item.uri);
-      }
-      resolve(ids);
+      const cancelId = cancellable.connect(() => reject(new Error("Search Cancelled")));
+      const cleanup = () => {
+        try {
+          cancellable.disconnect(cancelId);
+        } catch {
+        }
+      };
+      this.searchSpotify(parsed.searchQuery, parsed.searchType, cancellable).then((json) => {
+        cleanup();
+        if (cancellable.is_cancelled()) {
+          reject(new Error("Search Cancelled"));
+          return;
+        }
+        if (!json) {
+          resolve([]);
+          return;
+        }
+        const ids = [];
+        const items = json[`${parsed.searchType}s`]?.items || [];
+        for (const item of items) {
+          if (!item) continue;
+          item._searchType = parsed.searchType;
+          this.trackCache.set(item.uri, item);
+          ids.push(item.uri);
+        }
+        resolve(ids);
+      }).catch((e) => {
+        cleanup();
+        reject(e);
+      });
     });
   }
-  getSubsearchResultSet(previousResults, terms, cancellable) {
+  getSubsearchResultSet(_previousResults, terms, cancellable) {
+    if (cancellable.is_cancelled()) return Promise.reject(new Error("Search Cancelled"));
     return this.getInitialResultSet(terms, cancellable);
   }
   getResultMetas(resultIds, cancellable) {
-    return new Promise((resolve) => {
+    return new Promise((resolve, reject) => {
+      if (cancellable.is_cancelled()) {
+        reject(new Error("Search Cancelled"));
+        return;
+      }
+      const cancelId = cancellable.connect(() => reject(new Error("Search Cancelled")));
+      const scale = St.ThemeContext.get_for_stage(global.stage).scale_factor;
       const metas = resultIds.map((id) => {
-        if (id.startsWith("spotify:command:")) {
-          const cmd = id.split(":")[2];
-          let iconName = "media-playback-start-symbolic";
-          if (cmd === "pause") iconName = "media-playback-pause-symbolic";
-          if (cmd === "next") iconName = "media-skip-forward-symbolic";
-          if (cmd === "previous") iconName = "media-skip-backward-symbolic";
-          return {
-            id,
-            name: cmd.toUpperCase(),
-            description: "Spotify Command",
-            createIcon: (size) => new St.Icon({ icon_name: iconName, icon_size: size })
-          };
-        }
-        let isQueue = false;
-        let actualId = id;
-        if (id.startsWith("spotify:queue:")) {
-          isQueue = true;
-          actualId = id.substring(14);
-        }
-        const item = this.trackCache.get(actualId);
+        const item = this.trackCache.get(id);
         let desc = item?._searchType?.toUpperCase() || "TRACK";
         if (item?.artists && item.artists.length > 0) {
           desc += " \u2022 " + item.artists.map((a) => a.name).join(", ");
         }
-        if (isQueue) desc = "\u2795 Add to Shadow Queue \u2022 " + desc;
         return {
           id,
           name: item?.name || "Unknown",
           description: desc,
           createIcon: (size) => {
-            let gicon = this.appInfo ? this.appInfo.get_icon() : null;
-            if (gicon) return new St.Icon({ gicon, icon_size: size });
-            return new St.Icon({ icon_name: "audio-x-generic", icon_size: size });
+            const px = Math.round(size * scale);
+            const gicon = this._spotifyAppInfo ? this._spotifyAppInfo.get_icon() : null;
+            if (gicon) return new St.Icon({ gicon, icon_size: px });
+            return new St.Icon({ icon_name: "audio-x-generic", icon_size: px });
           }
         };
       });
+      try {
+        cancellable.disconnect(cancelId);
+      } catch {
+      }
+      if (cancellable.is_cancelled()) {
+        reject(new Error("Search Cancelled"));
+        return;
+      }
       resolve(metas);
     });
   }
@@ -260,48 +312,77 @@ var SpotifySearchProvider = class {
     return results.slice(0, max);
   }
   activateResult(id, terms) {
+    const queryText = terms.join(" ").trim().toLowerCase();
+    if (queryText.startsWith("$q") || queryText.startsWith("$queue")) {
+      void this._activateQueue(id);
+      return;
+    }
     const bus = Gio.DBus.session;
-    if (id.startsWith("spotify:queue:")) {
-      const uri = id.substring(14);
-      const item = this.trackCache.get(uri);
-      this.myQueue.push(uri);
-      Main.notify("Added to Shadow Queue", item?.name || "Track will play next");
-      return;
-    }
-    if (id.startsWith("spotify:command:")) {
-      const cmd = id.split(":")[2];
-      if (cmd === "next" && this.myQueue.length > 0) {
-        this.isHijacking = true;
-        const nextUri = this.myQueue.shift();
-        bus.call("org.mpris.MediaPlayer2.spotify", "/org/mpris/MediaPlayer2", "org.mpris.MediaPlayer2.Player", "OpenUri", new GLib.Variant("(s)", [nextUri]), null, Gio.DBusCallFlags.NONE, -1, null, null);
-        Main.notify("\u{1F3B5} Spotify Queue", "Skipped to shadow track");
-        GLib.timeout_add(GLib.PRIORITY_DEFAULT, 2e3, () => {
-          this.isHijacking = false;
-          return GLib.SOURCE_REMOVE;
-        });
-        return;
+    const openUriVariant = new GLib.Variant("(s)", [id]);
+    bus.call(
+      "org.mpris.MediaPlayer2.spotify",
+      "/org/mpris/MediaPlayer2",
+      "org.mpris.MediaPlayer2.Player",
+      "OpenUri",
+      openUriVariant,
+      null,
+      Gio.DBusCallFlags.NONE,
+      -1,
+      null,
+      null
+    );
+  }
+  async _activateQueue(id) {
+    const item = this.trackCache.get(id);
+    const trackName = item?.name || "Track";
+    if (!this.soupSession) return;
+    const runQueue = async () => {
+      if (!this.userAccessToken) {
+        const ok = await this.getUserAccessToken(null);
+        if (!ok) {
+          Main.notify("Spotify Search", "Log in under extension settings to use Add to queue.");
+          return;
+        }
       }
-      const method = cmd === "play" ? "Play" : cmd === "pause" ? "Pause" : cmd === "next" ? "Next" : "Previous";
-      bus.call("org.mpris.MediaPlayer2.spotify", "/org/mpris/MediaPlayer2", "org.mpris.MediaPlayer2.Player", method, null, null, Gio.DBusCallFlags.NONE, -1, null, null);
-      return;
-    }
-    this.myQueue = [];
-    bus.call("org.mpris.MediaPlayer2.spotify", "/org/mpris/MediaPlayer2", "org.mpris.MediaPlayer2.Player", "OpenUri", new GLib.Variant("(s)", [id]), null, Gio.DBusCallFlags.NONE, -1, null, null);
+      const msg = Soup.Message.new(
+        "POST",
+        `https://api.spotify.com/v1/me/player/queue?uri=${encodeURIComponent(id)}`
+      );
+      msg.request_headers.append("Authorization", `Bearer ${this.userAccessToken}`);
+      this.soupSession.send_and_read_async(msg, GLib.PRIORITY_DEFAULT, null, (s, res) => {
+        try {
+          s.send_and_read_finish(res);
+          const status = msg.get_status();
+          if (status === 204) {
+            Main.notify("Added to Spotify Queue", trackName);
+            return;
+          }
+          if (status === 401) {
+            this.userAccessToken = null;
+          }
+          Main.notify("Spotify Search", `Could not add to queue (HTTP ${status}). Is Spotify active?`);
+        } catch (e) {
+          logError(e, "Spotify queue");
+          Main.notify("Spotify Search", "Could not add to queue.");
+        }
+      });
+    };
+    await runQueue();
   }
 };
 var SpotifySearchExtension = class extends Extension {
   provider = null;
   enable() {
     try {
-      this.provider = new SpotifySearchProvider(this.getSettings());
+      this.provider = new SpotifySearchProvider(this, this.getSettings());
       Main.overview.searchController.addProvider(this.provider);
     } catch (e) {
+      logError(e, "SpotifySearchExtension enable");
     }
   }
   disable() {
     if (this.provider) {
       Main.overview.searchController.removeProvider(this.provider);
-      this.provider.destroy();
       this.provider = null;
     }
   }
