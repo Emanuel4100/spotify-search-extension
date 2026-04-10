@@ -1,12 +1,15 @@
 {
   "compilerOptions": {
     "target": "ES2022",
-    "module": "NodeNext",
-    "moduleResolution": "NodeNext",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
     "strict": true,
+    "strictNullChecks": false,
+    "noImplicitAny": false,
     "lib": ["ES2022"],
     "typeRoots": ["./node_modules/@girs"],
-    "skipLibCheck": true
+    "skipLibCheck": true,
+    "noEmit": true
   },
-  "include": ["src/**/*"]
+  "include": ["src/**/*.ts"]
 }

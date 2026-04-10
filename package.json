@@ -1,26 +1,29 @@
 {
-  "name": "spotify-search-provider",
+  "name": "spotify-search-extension",
   "version": "1.0.0",
-  "description": "Spotify Search Provider for GNOME Shell 49",
+  "description": "Spotify search provider for GNOME Shell (Activities overview)",
   "private": true,
   "type": "module",
   "scripts": {
+    "typecheck": "tsc --noEmit",
     "build": "esbuild src/extension.ts --bundle --external:gi://* --external:resource://* --format=esm --outfile=extension.js && esbuild src/prefs.ts --bundle --external:gi://* --external:resource://* --format=esm --outfile=prefs.js",
     "compile-schemas": "glib-compile-schemas schemas/",
     "pack": "npm run build && npm run compile-schemas && node scripts/pack.mjs",
     "install-ext": "npm run build && npm run compile-schemas && node scripts/install-local.mjs",
+    "uninstall-ext": "node scripts/uninstall-local.mjs",
+    "reinstall-ext": "bash scripts/reinstall-local.sh",
     "enable": "gnome-extensions enable spotify-search@emanuel.github.io",
     "disable": "gnome-extensions disable spotify-search@emanuel.github.io"
   },
   "devDependencies": {
-    "@girs/adw-1": "^1.0.0",
-    "@girs/gio-2.0": "^2.0.0",
-    "@girs/gjs": "^1.0.0",
-    "@girs/glib-2.0": "^2.0.0",
-    "@girs/gnome-shell": "^46.0.0",
-    "@girs/soup-3.0": "^3.0.0",
-    "@girs/st-15": "^1.0.0",
-    "esbuild": "^0.25.0",
-    "typescript": "^5.7.3"
+    "@girs/adw-1": "^1.9.0-4.0.0-beta.40",
+    "@girs/gio-2.0": "^2.86.4-4.0.0-beta.40",
+    "@girs/gjs": "^4.0.0-beta.40",
+    "@girs/glib-2.0": "^2.86.4-4.0.0-beta.40",
+    "@girs/gnome-shell": "^49.1.0",
+    "@girs/soup-3.0": "^3.6.6-4.0.0-beta.40",
+    "@girs/st-15": "^15.0.0-4.0.0-beta.40",
+    "esbuild": "^0.27.4",
+    "typescript": "^5.9.3"
   }
 }

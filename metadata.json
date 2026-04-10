@@ -1,7 +1,7 @@
 {
   "uuid": "spotify-search@emanuel.github.io",
   "name": "Spotify Search Provider",
-  "description": "Search Spotify from Activities with commands like $play. Client ID + Secret for search; optional login for $queue.",
+  "description": "Search Spotify from the Activities overview ($play, $queue, …). GNOME Shell 49. Bundled OAuth (PKCE); optional client credentials via gsettings for search without login.",
   "shell-version": ["49"],
   "settings-schema": "org.gnome.shell.extensions.spotify-search",
   "url": "https://github.com/emanuel/spotify-search-extension",

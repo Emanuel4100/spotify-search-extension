@@ -12,12 +12,17 @@ const zipPath = join(root, zipName);
 if (existsSync(zipPath)) unlinkSync(zipPath);
 
 const schemaXml = readdirSync(join(root, 'schemas')).filter((f) => f.endsWith('.gschema.xml'));
+const dataDir = join(root, 'data');
+const dataFiles = existsSync(dataDir)
+    ? readdirSync(dataDir).map((f) => join('data', f))
+    : [];
 const files = [
     'metadata.json',
     'extension.js',
     'prefs.js',
     join('schemas', 'gschemas.compiled'),
     ...schemaXml.map((f) => join('schemas', f)),
+    ...dataFiles,
 ];
 
 const r = spawnSync('zip', ['-r', zipName, ...files], {

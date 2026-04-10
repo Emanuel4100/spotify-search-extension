@@ -1,46 +1,122 @@
 import Adw from 'gi://Adw';
 import Gio from 'gi://Gio';
 import Gtk from 'gi://Gtk?version=4.0';
-import GLib from 'gi://GLib';
-import Soup from 'gi://Soup?version=3.0';
 
 // @ts-ignore
 import { ExtensionPreferences } from 'resource:///org/gnome/Shell/Extensions/js/extensions/prefs.js';
-
-const REDIRECT_URI = 'http://localhost:8080';
+import {
+    DEFAULT_REDIRECT_URI,
+    connectSpotifyOAuthButton,
+    disconnectActiveOAuthServer,
+    migrateOAuthRedirectIfNeeded,
+} from './prefs-oauth';
 
 export default class SpotifyPrefs extends ExtensionPreferences {
     fillPreferencesWindow(window: Adw.PreferencesWindow) {
         const page = new Adw.PreferencesPage();
         const credsGroup = new Adw.PreferencesGroup({
-            title: 'Spotify API app',
+            title: 'Spotify connection',
             description:
-                'Create an app at developer.spotify.com and add Redirect URI: http://localhost:8080. Client ID and Secret are enough to search and play via MPRIS.',
+                'Uses a bundled Spotify app (PKCE). In the Developer Dashboard, add redirect URI http://127.0.0.1:8080 unless you use a custom address below. HTTP loopback only—not https.',
         });
         page.add(credsGroup);
         window.add(page);
 
         const settings = this.getSettings();
+        migrateOAuthRedirectIfNeeded(settings);
 
-        const idRow = new Adw.EntryRow({ title: 'Client ID' });
-        settings.bind('client-id', idRow, 'text', Gio.SettingsBindFlags.DEFAULT);
-        credsGroup.add(idRow);
+        for (const key of [
+            'oauth-use-custom-redirect',
+            'oauth-redirect-uri',
+            'refresh-token',
+            'client-id',
+            'client-secret',
+        ]) {
+            if (!settings.is_writable(key)) {
+                console.error(`[spotify-search prefs] gsettings key not writable: ${key}`);
+            }
+        }
 
-        const secretRow = new Adw.PasswordEntryRow({ title: 'Client Secret' });
-        settings.bind('client-secret', secretRow, 'text', Gio.SettingsBindFlags.DEFAULT);
-        credsGroup.add(secretRow);
+        const defaultRedirectRow = new Adw.ActionRow({
+            title: 'Redirect URI',
+            subtitle: `Default ${DEFAULT_REDIRECT_URI} — add this exact URI in your Spotify app.`,
+        });
+        credsGroup.add(defaultRedirectRow);
+
+        const customRedirectRow = new Adw.ActionRow({
+            title: 'Use custom redirect URI',
+            subtitle: 'Only if you need another host or port. Must match the Spotify app and this machine.',
+        });
+        const customRedirectSwitch = new Gtk.Switch({ valign: Gtk.Align.CENTER });
+        settings.bind(
+            'oauth-use-custom-redirect',
+            customRedirectSwitch,
+            'active',
+            Gio.SettingsBindFlags.DEFAULT,
+        );
+        customRedirectRow.add_suffix(customRedirectSwitch);
+        customRedirectRow.activatable_widget = customRedirectSwitch;
+        credsGroup.add(customRedirectRow);
+
+        const customUriRow = new Adw.ActionRow({ title: 'Custom redirect URI' });
+        const redirectEntry = new Gtk.Entry({
+            valign: Gtk.Align.CENTER,
+            width_request: 260,
+            hexpand: true,
+            placeholder_text: DEFAULT_REDIRECT_URI,
+        });
+        settings.bind('oauth-redirect-uri', redirectEntry, 'text', Gio.SettingsBindFlags.DEFAULT);
+        customUriRow.add_suffix(redirectEntry);
+        credsGroup.add(customUriRow);
+
+        const syncCustomUriVisibility = (): void => {
+            const custom = settings.get_boolean('oauth-use-custom-redirect');
+            customUriRow.set_visible(custom);
+            if (custom && !settings.get_string('oauth-redirect-uri').trim()) {
+                settings.set_string('oauth-redirect-uri', DEFAULT_REDIRECT_URI);
+            }
+        };
+        settings.connect('changed::oauth-use-custom-redirect', syncCustomUriVisibility);
+        customRedirectSwitch.connect('notify::active', syncCustomUriVisibility);
+        syncCustomUriVisibility();
+
+        window.connect('close-request', () => {
+            disconnectActiveOAuthServer();
+            settings.apply();
+            return false;
+        });
+
+        const behaviorGroup = new Adw.PreferencesGroup({
+            title: 'Search actions',
+            description:
+                'Optional feedback when you use overview search to play or queue. Errors (login, no device, etc.) always show a notification.',
+        });
+        page.add(behaviorGroup);
+
+        const notifRow = new Adw.ActionRow({
+            title: 'Notify on play and queue',
+            subtitle:
+                'Show a system notification with title and artist after playback starts or a track is queued.',
+        });
+        const notifSwitch = new Gtk.Switch({ valign: Gtk.Align.CENTER });
+        settings.bind(
+            'show-action-notifications',
+            notifSwitch,
+            'active',
+            Gio.SettingsBindFlags.DEFAULT,
+        );
+        notifRow.add_suffix(notifSwitch);
+        notifRow.activatable_widget = notifSwitch;
+        behaviorGroup.add(notifRow);
 
         const authGroup = new Adw.PreferencesGroup({
-            title: 'Spotify account (queue only)',
+            title: 'Spotify account',
             description:
-                'Browser login is only required for $queue / $q. Search and play ($play, etc.) use Client ID + Secret only.',
+                'Log in for $queue and liked songs first on $play. Re-login after upgrading (new permissions). The browser opens Spotify; the callback uses the redirect URI shown above.',
         });
         page.add(authGroup);
 
-        const authRow = new Adw.ActionRow({
-            title: 'Log in with Spotify',
-            subtitle: 'Grants permission to add tracks to your playback queue.',
-        });
+        const authRow = new Adw.ActionRow({ title: 'Log in with Spotify' });
         const btn = new Gtk.Button({
             label: 'Log In',
             valign: Gtk.Align.CENTER,
@@ -49,114 +125,6 @@ export default class SpotifyPrefs extends ExtensionPreferences {
         authRow.add_suffix(btn);
         authGroup.add(authRow);
 
-        btn.connect('clicked', () => {
-            const clientId = settings.get_string('client-id');
-            const clientSecret = settings.get_string('client-secret');
-
-            if (!clientId || !clientSecret) {
-                btn.set_label('Add Client ID and Secret first');
-                return;
-            }
-
-            btn.set_label('Waiting for browser…');
-
-            const server = new Soup.Server({});
-            server.add_handler('/', (srv, msg, _path, _query) => {
-                const uri = msg.get_uri();
-                const queryStr = uri.get_query();
-
-                if (queryStr && queryStr.includes('code=')) {
-                    const raw = queryStr.split('code=')[1]?.split('&')[0] ?? '';
-                    let code: string;
-                    try {
-                        code = decodeURIComponent(raw.replace(/\+/g, '%20'));
-                    } catch {
-                        code = raw;
-                    }
-
-                    btn.set_label('Exchanging code…');
-
-                    const reqMsg = Soup.Message.new('POST', 'https://accounts.spotify.com/api/token');
-
-                    // @ts-ignore
-                    const authBytes = new TextEncoder().encode(`${clientId}:${clientSecret}`);
-                    const authB64 = GLib.base64_encode(authBytes);
-                    reqMsg.request_headers.append('Authorization', `Basic ${authB64}`);
-                    reqMsg.request_headers.append('Content-Type', 'application/x-www-form-urlencoded');
-
-                    const body =
-                        `grant_type=authorization_code&code=${encodeURIComponent(code)}` +
-                        `&redirect_uri=${encodeURIComponent(REDIRECT_URI)}`;
-                    reqMsg.set_request_body_from_bytes(
-                        'application/x-www-form-urlencoded',
-                        // @ts-ignore
-                        GLib.Bytes.new(new TextEncoder().encode(body)),
-                    );
-
-                    const session = new Soup.Session();
-                    session.send_and_read_async(reqMsg, GLib.PRIORITY_DEFAULT, null, (s, res) => {
-                        try {
-                            const bytes = s.send_and_read_finish(res);
-                            const dataArray = bytes.get_data();
-                            if (!dataArray) {
-                                btn.set_label('Empty token response');
-                                return;
-                            }
-                            // @ts-ignore
-                            const text = new TextDecoder('utf-8').decode(dataArray);
-                            const data = JSON.parse(text) as {
-                                refresh_token?: string;
-                                error?: string;
-                                error_description?: string;
-                            };
-
-                            if (data.error) {
-                                const detail = data.error_description || data.error;
-                                btn.set_label(`Spotify: ${detail.substring(0, 80)}`);
-                                return;
-                            }
-
-                            if (data.refresh_token) {
-                                settings.set_string('refresh-token', data.refresh_token);
-                                btn.set_label('Saved. You can use $queue.');
-                                return;
-                            }
-
-                            btn.set_label('No refresh token (try revoking app access and log in again)');
-                        } catch (e) {
-                            btn.set_label('Error exchanging code');
-                        }
-                    });
-                }
-
-                msg.get_response_headers().set_content_type('text/html', null);
-                const html =
-                    '<div style="font-family: sans-serif; text-align: center; padding-top: 100px;">' +
-                    '<h1 style="color: #1DB954;">Authorized</h1>' +
-                    '<p>You can close this tab and return to extension settings.</p></div>';
-                msg.get_response_body().append(html);
-                msg.set_status(200, null);
-
-                GLib.timeout_add(GLib.PRIORITY_DEFAULT, 2000, () => {
-                    server.disconnect();
-                    return GLib.SOURCE_REMOVE;
-                });
-            });
-
-            try {
-                server.listen_local(8080, Soup.ServerListenOptions.IPV4_ONLY);
-            } catch {
-                btn.set_label('Port 8080 busy — close other apps using it');
-                return;
-            }
-
-            const scope = encodeURIComponent('user-modify-playback-state');
-            const authUrl =
-                `https://accounts.spotify.com/authorize?client_id=${encodeURIComponent(clientId)}` +
-                '&response_type=code' +
-                `&redirect_uri=${encodeURIComponent(REDIRECT_URI)}` +
-                `&scope=${scope}`;
-            Gio.AppInfo.launch_default_for_uri(authUrl, null);
-        });
+        connectSpotifyOAuthButton({ settings, button: btn });
     }
 }

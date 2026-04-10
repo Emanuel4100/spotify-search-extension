@@ -10,5 +10,20 @@
     <key name="refresh-token" type="s">
       <default>''</default>
     </key>
+    <key name="oauth-use-custom-redirect" type="b">
+      <default>false</default>
+      <summary>Use a custom OAuth redirect URI</summary>
+      <description>When false, the extension always uses http://127.0.0.1:8080 for the Spotify login callback. Turn on only if you need a different loopback URL.</description>
+    </key>
+    <key name="oauth-redirect-uri" type="s">
+      <default>''</default>
+      <summary>Custom OAuth redirect URI</summary>
+      <description>Used only when oauth-use-custom-redirect is true. Must match a Redirect URI in your Spotify app exactly. HTTP loopback only (not https).</description>
+    </key>
+    <key name="show-action-notifications" type="b">
+      <default>false</default>
+      <summary>Notify when playing or queuing from search</summary>
+      <description>Show a system notification after you start playback or successfully add a track to the queue from overview search. Error messages are always shown.</description>
+    </key>
   </schema>
 </schemalist>

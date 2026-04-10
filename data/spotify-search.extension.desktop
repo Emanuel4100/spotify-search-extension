@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Spotify
+Comment=Search Spotify from GNOME Shell
+Icon=spotify
+# Must NOT use NoDisplay=true: Gio.DesktopAppInfo.should_show() is false, so Shell drops
+# the search provider in SearchResultsView._registerProvider (GNOME 49+).
+Exec=/usr/bin/true
+Terminal=false
